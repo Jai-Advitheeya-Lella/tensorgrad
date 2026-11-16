@@ -1,0 +1,7 @@
+numpy==2.5.4
+matplotlib==3.11.2
+graphviz==0.21
+tqdm==4.70.1
+pytest==9.2.0
+# Reference implementation for tests and benchmarks (CPU build is enough):
+torch==2.11.0
