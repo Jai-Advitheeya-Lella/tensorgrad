@@ -559,14 +559,19 @@ def _pad_hw(x: np.ndarray, ph: int, pw: int, value: float = 0.0) -> np.ndarray:
     return np.pad(x, ((0, 0), (0, 0), (ph, ph), (pw, pw)), constant_values=value)
 
 
-def _scatter_windows(dwin: np.ndarray, padded_shape: tuple[int, ...], sh: int, sw: int) -> np.ndarray:
-    """Adjoint of :func:`_windows`: add (N, C, OH, OW, KH, KW) window grads into the image."""
-    n, c, oh, ow, kh, kw = dwin.shape
-    out = np.zeros(padded_shape, dtype=dwin.dtype)
+def _col2im(dcols: np.ndarray, padded_shape: tuple[int, ...], sh: int, sw: int) -> np.ndarray:
+    """Adjoint of im2col: add (C, KH, KW, N, OH, OW) column grads back into an NCHW image.
+
+    One strided add per kernel offset (KH*KW of them). The accumulator is kept
+    in (C, N, H, W) order so both operands of every add share a layout.
+    """
+    c, kh, kw, n, oh, ow = dcols.shape
+    _, _, hp, wp = padded_shape
+    out = np.zeros((c, n, hp, wp), dtype=dcols.dtype)
     for i in range(kh):
         for j in range(kw):
-            out[:, :, i : i + sh * oh : sh, j : j + sw * ow : sw] += dwin[:, :, :, :, i, j]
-    return out
+            out[:, :, i : i + sh * oh : sh, j : j + sw * ow : sw] += dcols[:, i, j]
+    return out.transpose(1, 0, 2, 3)
 
 
 def _unpad_hw(x: np.ndarray, ph: int, pw: int) -> np.ndarray:
@@ -575,12 +580,13 @@ def _unpad_hw(x: np.ndarray, ph: int, pw: int) -> np.ndarray:
 
 
 class Conv2d(Function):
-    """2-D cross-correlation via im2col + a single GEMM.
+    """2-D cross-correlation via im2col + one GEMM per pass.
 
-    Forward: gather every receptive field into a matrix of shape
-    ``(N*OH*OW, C*KH*KW)`` and multiply by the flattened kernel. Backward:
-    ``dW = dY^T cols`` and ``dcols = dY W``, then col2im scatters ``dcols``
-    back into the (padded) input with ``KH*KW`` strided adds.
+    Forward: copy every receptive field into a column matrix ``cols`` of shape
+    ``(C*KH*KW, N*OH*OW)`` and compute ``Y = W cols`` with ``W`` the kernel
+    flattened to ``(OC, C*KH*KW)``. Backward: ``dW = dY cols^T`` and
+    ``dcols = W^T dY`` (one GEMM each), then col2im scatters ``dcols`` back
+    into the (padded) input.
     """
 
     def forward(self, x: np.ndarray, w: np.ndarray, stride: Any = 1, padding: Any = 0) -> np.ndarray:
@@ -593,25 +599,26 @@ class Conv2d(Function):
         xp = _pad_hw(x, ph, pw)
         hp, wp = xp.shape[2:]
         oh, ow = (hp - kh) // sh + 1, (wp - kw) // sw + 1
-        # (N, OH, OW, C, KH, KW) -> rows are receptive fields
-        win = _windows(xp, kh, kw, sh, sw, oh, ow).transpose(0, 2, 3, 1, 4, 5)
-        cols = win.reshape(n * oh * ow, c * kh * kw)
+        # (N, C, OH, OW, KH, KW) view -> (C, KH, KW, N, OH, OW) copy = im2col
+        win = _windows(xp, kh, kw, sh, sw, oh, ow).transpose(1, 4, 5, 0, 2, 3)
+        cols = np.ascontiguousarray(win).reshape(c * kh * kw, n * oh * ow)
         w2 = w.reshape(oc, -1)
-        out = cols @ w2.T
+        out = w2 @ cols  # (OC, N*OH*OW)
         self.cols = cols if self.needs_input_grad[1] else None
         self.w2, self.w_shape = w2, w.shape
         self.geom = (n, c, hp, wp, oh, ow, kh, kw, sh, sw, ph, pw)
-        return out.reshape(n, oh, ow, oc).transpose(0, 3, 1, 2)
+        return out.reshape(oc, n, oh, ow).transpose(1, 0, 2, 3)
 
     def backward(self, g: np.ndarray) -> tuple[np.ndarray | None, np.ndarray | None]:
         n, c, hp, wp, oh, ow, kh, kw, sh, sw, ph, pw = self.geom
         oc = self.w_shape[0]
-        g2 = g.transpose(0, 2, 3, 1).reshape(-1, oc)
-        dw = (g2.T @ self.cols).reshape(self.w_shape) if self.needs_input_grad[1] else None
-        dx = None
+        g2 = g.transpose(1, 0, 2, 3).reshape(oc, n * oh * ow)
+        dw = dx = None
+        if self.needs_input_grad[1]:
+            dw = (g2 @ self.cols.T).reshape(self.w_shape)
         if self.needs_input_grad[0]:
-            dcols = (g2 @ self.w2).reshape(n, oh, ow, c, kh, kw).transpose(0, 3, 1, 2, 4, 5)
-            dx = _unpad_hw(_scatter_windows(dcols, (n, c, hp, wp), sh, sw), ph, pw)
+            dcols = (self.w2.T @ g2).reshape(c, kh, kw, n, oh, ow)
+            dx = _unpad_hw(_col2im(dcols, (n, c, hp, wp), sh, sw), ph, pw)
         return dx, dw
 
 
