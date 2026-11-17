@@ -1,0 +1,35 @@
+{
+ "meta": {
+  "numpy": "2.5.4",
+  "torch": "2.11.0+cu128",
+  "threads": 4,
+  "cpu": "Intel(R) Core(TM) Ultra 7 270K Plus",
+  "trials": 30
+ },
+ "results": [
+  {
+   "case": "matmul 1024x1024 fwd+bwd",
+   "tensorgrad_ms": 11.938892002945067,
+   "torch_ms": 11.309081000945298,
+   "slowdown": 1.055690732248458
+  },
+  {
+   "case": "MLP 784-512-256-10, batch 128",
+   "tensorgrad_ms": 3.61743149915128,
+   "torch_ms": 1.9290754971734714,
+   "slowdown": 1.8752150988655598
+  },
+  {
+   "case": "CNN (3 conv + BN), batch 64",
+   "tensorgrad_ms": 88.05601700078114,
+   "torch_ms": 24.012490503082518,
+   "slowdown": 3.667092215589935
+  },
+  {
+   "case": "Char transformer 4L d128, 32x64 tokens",
+   "tensorgrad_ms": 135.9541080018971,
+   "torch_ms": 54.528278997167945,
+   "slowdown": 2.493277075716221
+  }
+ ]
+}
